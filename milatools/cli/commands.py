@@ -32,7 +32,7 @@ import rich.logging
 from typing_extensions import TypedDict, deprecated
 
 from milatools.cli import console
-from milatools.cli.code import code
+from milatools.cli.code import code, mila_gpu
 from milatools.cli.init_command import (
     print_welcome_message,
     setup_keys_on_login_node,
@@ -265,6 +265,22 @@ def add_arguments(parser: argparse.ArgumentParser):
         code_parser.set_defaults(function=code_v1)
     else:
         code_parser.set_defaults(function=code)
+
+    # ----- mila gpu-node ------
+    gpu_parser = subparsers.add_parser(
+        "gpu-node",
+        help="Command to start a GPU task and write mila-gpu alias into ssh config",
+    )
+    gpu_parser.add_argument(
+        "--cluster",
+        type=str,
+        # choices=CLUSTERS,
+        default="mila",
+        help="Which cluster to connect to.",
+    )
+    _add_allocation_options(gpu_parser)
+
+    gpu_parser.set_defaults(function=mila_gpu)
 
     # ----- mila sync vscode-extensions ------
 

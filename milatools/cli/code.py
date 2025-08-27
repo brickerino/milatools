@@ -5,6 +5,7 @@ import shutil
 from collections.abc import Awaitable
 from logging import getLogger as get_logger
 from pathlib import PurePosixPath
+import os
 
 from milatools.cli import console
 from milatools.cli.init_command import DRAC_CLUSTERS
@@ -214,3 +215,127 @@ async def launch_vscode_loop(code_command: str, compute_node: ComputeNode, path:
         except Exception as exc:
             logger.error(f"Error while waiting for user input: {exc}")
             break
+
+
+async def launch_pause_loop():
+    while True:
+        try:
+            input()
+        except KeyboardInterrupt:
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Error while waiting for user input: {exc}")
+            break
+
+
+def write_mila_gpu_ssh_config(gpu_node:str) -> None:
+    main_config = list(open(os.path.expanduser('~') + '/.ssh/config'))
+
+    i = 0
+    while 'Host mila' not in main_config[i]:
+        i += 1
+    while 'User' not in main_config[i]:
+        i += 1
+
+    user = main_config[i].strip().split(' ')[1]
+
+    ssh_config = (
+        "Host mila-gpu\n"
+        "    HostName " + gpu_node + '\n'
+        "    ProxyJump mila\n"
+        "    ControlMaster auto\n"
+        "    ControlPath ~/.cache/ssh/%r@%h:%p\n"
+        "    ControlPersist yes\n"
+        "    User " + user + "\n"
+    )
+
+    with open(os.path.expanduser('~') + '/.ssh/mila_gpu', 'w') as f:
+        f.write(ssh_config)
+
+    console.print(
+        "Wrote the mila-gpu alias to your ~/.ssh/mila_gpu file. You can now connect "
+        f"to {gpu_node} with `ssh mila-gpu`.",
+        style="green",
+    )
+
+
+def clean_mila_gpu_ssh_config() -> None:
+    try:
+        import os
+        with open(os.path.expanduser('~') + '/.ssh/mila_gpu', 'w') as f:
+            pass
+        console.print(
+            "Cleaned the ~/.ssh/mila_gpu file.",
+            style="green",
+        )
+    except FileNotFoundError:
+        pass
+
+
+async def mila_gpu(
+    alloc: list[str],
+    cluster: str = "mila",
+    persist: bool = False,
+) -> ComputeNode | int:
+    """Allocate a GPU task on the cluster and substitute the mila_gpu alias in the .ssh/config
+
+    Arguments:
+        persist: Whether the server should persist or not after exiting the terminal.
+        job: ID of the job to connect to
+        node: Name of the node to connect to
+        alloc: Extra options to pass to slurm
+    """
+    # Connect to the cluster's login node.
+    login_node = await RemoteV2.connect(cluster)
+
+    try:
+        await check_disk_quota(login_node)
+    except MilatoolsUserError:
+        # Raise errors that are meant to be shown to the user (disk quota is reached).
+        raise
+    except Exception as exc:
+        logger.warning(
+            f"Unable to check the disk-quota on the {cluster} cluster: {exc}"
+        )
+
+    compute_node_task: Awaitable[ComputeNode]
+
+    if cluster in DRAC_CLUSTERS and not any("--account" in flag for flag in alloc):
+        logger.warning(
+            "Warning: When using the DRAC clusters, you usually need to "
+            "specify the account to use when submitting a job. You can specify "
+            "this in the job resources with `--alloc`, like so: "
+            "`--alloc --account=<account_to_use>`, for example:\n"
+            f"mila code some_path --cluster {cluster} --alloc "
+            f"--account=your-account-here"
+        )
+    # Set the job name to `mila-code`. This should not be changed by the user
+    # ideally, so we can collect some simple stats about the use of `milatools` on
+    # the clusters.
+    if any(flag.split("=")[0] in ("-J", "--job-name") for flag in alloc):
+        raise MilatoolsUserError(
+            "The job name flag (--job-name or -J) should be left unset for now "
+            "because we use the job name to measure how many people use `mila "
+            "code` on the various clusters. We also make use of the job name when "
+            "the call to `salloc` is interrupted before we have a chance to know "
+            "the job id."
+        )
+    job_name = "mila-code"
+    alloc = alloc + [f"--job-name={job_name}"]
+
+    compute_node_task = salloc(
+        login_node, salloc_flags=alloc, job_name=job_name
+    )
+    compute_node = await compute_node_task
+
+    write_mila_gpu_ssh_config(compute_node.hostname)
+    await launch_pause_loop()
+
+    await compute_node.close_async()
+    console.print(f"Ended session on '{compute_node.hostname}'")
+
+    clean_mila_gpu_ssh_config()
+    return compute_node.job_id
+
